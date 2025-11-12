@@ -1,14 +1,24 @@
-Auto Real Estate ETL (WIP)
+# Auto Project
 
-Status: Project is in active development.
-More features for data cleaning, normalization, and deduplication will be added soon to improve data quality and remove all doubts.
+A data analytics system for the Czech automotive market built in **Python** with a clean **OOP** architecture.  
+It scrapes listings from sauto, processes them through an ETL pipeline,  
+and visualizes the results in **Apache Superset**.
 
-Stack:
-	•	Python
-	•	pandas
-	•	SQL
-	•	PostgreSQL
+## Features
+- Object-oriented modular architecture  
+- Config-driven ETL pipeline with logging  
+- Built-in sanity checks and unit tests  
+- Continuous Integration (lint, type check, tests)  
+- Visualization dashboards in Apache Superset  
+- MIT License
 
-What it does:
-Automated ETL for cleaning, transforming, and loading real estate data into a unified table (PostgreSQL).
-All processes run daily and are fully automated — ready for direct use in Power BI dashboards and analytics.
+## Quickstart
+```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -U pip
+pip install -e .
+
+# copy config and run
+cp config/config.json
+python -m auto_project
