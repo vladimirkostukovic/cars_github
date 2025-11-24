@@ -1,6 +1,3 @@
-"""
-Конфигурация и утилиты.
-"""
 import json
 import re
 import logging
