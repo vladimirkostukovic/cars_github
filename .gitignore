@@ -20,7 +20,6 @@ cache_data/
 ds.store
 
 # Ignore config files with secrets
-config.py
 config.json
 test.py
 table_moving.py

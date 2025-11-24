@@ -12,13 +12,3 @@ and visualizes the results in **Apache Superset**.
 - Visualization dashboards in Apache Superset  
 - MIT License
 
-## Quickstart
-```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -U pip
-pip install -e .
-
-# copy config and run
-cp config/config.json
-python -m auto_project
