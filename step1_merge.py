@@ -309,6 +309,126 @@ def run_merge(engine):
     logger.info(f"Total: new={total_new}, sold={total_sold}, reactivated={total_reactivated}")
 
 
+# ============== Sanity Checks ==============
+def sanity_check(engine) -> bool:
+    logger = logging.getLogger('merge')
+    logger.info("Running sanity checks...")
+
+    errors = []
+    warnings = []
+
+    # 1. Проверка что merged существует и не пустой
+    try:
+        count = pd.read_sql(f"SELECT COUNT(*) as cnt FROM {SCHEMA}.merged", engine).iloc[0]['cnt']
+        if count == 0:
+            errors.append("merged table is empty")
+        else:
+            logger.info(f"  Total records: {count}")
+    except Exception as e:
+        errors.append(f"Cannot read merged table: {e}")
+        return False
+
+    # 2. Проверка на дубликаты id
+    dupes = pd.read_sql(f"""
+        SELECT id, COUNT(*) as cnt 
+        FROM {SCHEMA}.merged 
+        GROUP BY id 
+        HAVING COUNT(*) > 1
+        LIMIT 10
+    """, engine)
+    if not dupes.empty:
+        errors.append(f"Duplicate IDs found: {len(dupes)} (showing first 10)")
+    else:
+        logger.info("  No duplicate IDs")
+
+    # 3. Проверка что date_added не в будущем
+    future_added = pd.read_sql(f"""
+        SELECT COUNT(*) as cnt 
+        FROM {SCHEMA}.merged 
+        WHERE date_added > CURRENT_DATE
+    """, engine).iloc[0]['cnt']
+    if future_added > 0:
+        warnings.append(f"Records with future date_added: {future_added}")
+    else:
+        logger.info("  No future date_added")
+
+    # 4. Проверка что date_sold >= date_added
+    bad_dates = pd.read_sql(f"""
+        SELECT COUNT(*) as cnt 
+        FROM {SCHEMA}.merged 
+        WHERE date_sold IS NOT NULL AND date_sold < date_added
+    """, engine).iloc[0]['cnt']
+    if bad_dates > 0:
+        errors.append(f"Records where date_sold < date_added: {bad_dates}")
+    else:
+        logger.info("  All date_sold >= date_added")
+
+    # 5. Проверка active vs sold
+    stats = pd.read_sql(f"""
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN date_sold IS NULL THEN 1 ELSE 0 END) as active,
+            SUM(CASE WHEN date_sold IS NOT NULL THEN 1 ELSE 0 END) as sold
+        FROM {SCHEMA}.merged
+    """, engine).iloc[0]
+    logger.info(f"  Active: {stats['active']}, Sold: {stats['sold']}, Total: {stats['total']}")
+
+    # 6. Проверка что все обработанные снапшоты записаны
+    processed_count = pd.read_sql(
+        f"SELECT COUNT(*) as cnt FROM {SCHEMA}.processed_snapshots",
+        engine
+    ).iloc[0]['cnt']
+    snapshot_count = len(list_snapshots(engine))
+    if processed_count < snapshot_count:
+        warnings.append(f"Not all snapshots processed: {processed_count}/{snapshot_count}")
+    else:
+        logger.info(f"  All snapshots processed: {processed_count}/{snapshot_count}")
+
+    # 7. Проверка NULL в критичных полях
+    null_checks = ['id', 'price', 'date_added']
+    for col in null_checks:
+        null_count = pd.read_sql(f"""
+            SELECT COUNT(*) as cnt 
+            FROM {SCHEMA}.merged 
+            WHERE {col} IS NULL
+        """, engine).iloc[0]['cnt']
+        if null_count > 0:
+            errors.append(f"NULL values in {col}: {null_count}")
+        else:
+            logger.info(f"  No NULLs in {col}")
+
+    # 8. Проверка распределения по датам (последние 7 дней)
+    recent = pd.read_sql(f"""
+        SELECT date_added, COUNT(*) as cnt 
+        FROM {SCHEMA}.merged 
+        WHERE date_added >= CURRENT_DATE - INTERVAL '7 days'
+        GROUP BY date_added 
+        ORDER BY date_added DESC
+    """, engine)
+    if recent.empty:
+        warnings.append("No records in last 7 days")
+    else:
+        logger.info(f"  Last 7 days activity: {len(recent)} days with data")
+
+    # Результаты
+    if errors:
+        logger.error("Sanity check FAILED:")
+        for e in errors:
+            logger.error(f"  ERROR: {e}")
+        for w in warnings:
+            logger.warning(f"  WARNING: {w}")
+        return False
+
+    if warnings:
+        logger.warning("Sanity check PASSED with warnings:")
+        for w in warnings:
+            logger.warning(f"  WARNING: {w}")
+    else:
+        logger.info("Sanity check PASSED")
+
+    return True
+
+
 def main():
     setup_logging()
     logger = logging.getLogger('merge')
@@ -319,6 +439,11 @@ def main():
     start = datetime.now()
     engine = get_engine()
     run_merge(engine)
+
+    # Sanity check после merge
+    logger.info("-" * 60)
+    sanity_check(engine)
+
     elapsed = (datetime.now() - start).total_seconds()
     logger.info(f"Step 1 complete in {elapsed:.1f}s")
 

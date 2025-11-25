@@ -227,7 +227,7 @@ def find_price_changes(df_prev: pd.DataFrame, df_last: pd.DataFrame) -> pd.DataF
     changes = merged[
         (merged['price_new'] != merged['price_old']) &
         (abs(merged['price_new'] - merged['price_old']) >= MIN_PRICE_CHANGE)
-    ].copy()
+        ].copy()
     return changes
 
 
@@ -288,6 +288,212 @@ def run_price_tracking(engine):
     logger.info("✓ Price tracking complete")
 
 
+# ============== Sanity Checks ==============
+def sanity_check_standart(engine) -> bool:
+    logger = logging.getLogger('transform')
+    logger.info("Running sanity checks for standart...")
+
+    errors = []
+    warnings = []
+
+    # 1. Таблица существует и не пустая
+    try:
+        count = pd.read_sql(f"SELECT COUNT(*) as cnt FROM {SCHEMA}.standart", engine).iloc[0]['cnt']
+        if count == 0:
+            errors.append("standart table is empty")
+        else:
+            logger.info(f"  Total records: {count}")
+    except Exception as e:
+        errors.append(f"Cannot read standart table: {e}")
+        return False
+
+    # 2. Проверка на дубликаты id
+    dupes = pd.read_sql(f"""
+        SELECT id, COUNT(*) as cnt 
+        FROM {SCHEMA}.standart 
+        GROUP BY id 
+        HAVING COUNT(*) > 1
+        LIMIT 10
+    """, engine)
+    if not dupes.empty:
+        errors.append(f"Duplicate IDs found: {len(dupes)}")
+    else:
+        logger.info("  No duplicate IDs")
+
+    # 3. NULL в критичных полях
+    critical_cols = ['id', 'price', 'dated_added', 'manufacture', 'model']
+    for col in critical_cols:
+        try:
+            null_count = pd.read_sql(f"""
+                SELECT COUNT(*) as cnt 
+                FROM {SCHEMA}.standart 
+                WHERE {col} IS NULL
+            """, engine).iloc[0]['cnt']
+            if null_count > 0:
+                if col in ['manufacture', 'model']:
+                    warnings.append(f"NULL values in {col}: {null_count}")
+                else:
+                    errors.append(f"NULL values in {col}: {null_count}")
+            else:
+                logger.info(f"  No NULLs in {col}")
+        except Exception:
+            pass
+
+    # 4. Проверка price range
+    price_stats = pd.read_sql(f"""
+        SELECT 
+            MIN(CAST(price AS NUMERIC)) as min_price,
+            MAX(CAST(price AS NUMERIC)) as max_price,
+            AVG(CAST(price AS NUMERIC)) as avg_price
+        FROM {SCHEMA}.standart
+        WHERE price IS NOT NULL
+    """, engine).iloc[0]
+    logger.info(f"  Price range: {price_stats['min_price']:.0f} - {price_stats['max_price']:.0f} (avg: {price_stats['avg_price']:.0f})")
+
+    if price_stats['min_price'] < 0:
+        errors.append("Negative prices found")
+    if price_stats['max_price'] > 50000000:
+        warnings.append(f"Very high max price: {price_stats['max_price']}")
+
+    # 5. Active vs Sold
+    stats = pd.read_sql(f"""
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN date_sold IS NULL THEN 1 ELSE 0 END) as active,
+            SUM(CASE WHEN date_sold IS NOT NULL THEN 1 ELSE 0 END) as sold
+        FROM {SCHEMA}.standart
+    """, engine).iloc[0]
+    logger.info(f"  Active: {stats['active']}, Sold: {stats['sold']}")
+
+    # 6. Fuel types check
+    fuels = pd.read_sql(f"""
+        SELECT fuel, COUNT(*) as cnt 
+        FROM {SCHEMA}.standart 
+        WHERE fuel IS NOT NULL
+        GROUP BY fuel
+        ORDER BY cnt DESC
+    """, engine)
+    logger.info(f"  Fuel types: {len(fuels)}")
+    if len(fuels) > 20:
+        warnings.append(f"Too many fuel types: {len(fuels)}")
+
+    # 7. Gearbox types check
+    gearbox = pd.read_sql(f"""
+        SELECT gearbox, COUNT(*) as cnt 
+        FROM {SCHEMA}.standart 
+        WHERE gearbox IS NOT NULL
+        GROUP BY gearbox
+    """, engine)
+    logger.info(f"  Gearbox types: {len(gearbox)}")
+
+    # Результаты
+    if errors:
+        logger.error("Sanity check FAILED:")
+        for e in errors:
+            logger.error(f"  ERROR: {e}")
+        for w in warnings:
+            logger.warning(f"  WARNING: {w}")
+        return False
+
+    if warnings:
+        logger.warning("Sanity check PASSED with warnings:")
+        for w in warnings:
+            logger.warning(f"  WARNING: {w}")
+    else:
+        logger.info("Sanity check PASSED")
+
+    return True
+
+
+def sanity_check_price_history(engine) -> bool:
+    logger = logging.getLogger('prices')
+    logger.info("Running sanity checks for price_history...")
+
+    errors = []
+    warnings = []
+
+    # 1. Таблица существует
+    try:
+        count = pd.read_sql(f"SELECT COUNT(*) as cnt FROM {SCHEMA}.price_history", engine).iloc[0]['cnt']
+        logger.info(f"  Total price changes: {count}")
+        if count == 0:
+            logger.info("  price_history is empty (may be expected)")
+            return True
+    except Exception as e:
+        errors.append(f"Cannot read price_history table: {e}")
+        return False
+
+    # 2. Проверка на отрицательные цены
+    neg_prices = pd.read_sql(f"""
+        SELECT COUNT(*) as cnt 
+        FROM {SCHEMA}.price_history 
+        WHERE old_price < 0 OR new_price < 0
+    """, engine).iloc[0]['cnt']
+    if neg_prices > 0:
+        errors.append(f"Negative prices in history: {neg_prices}")
+    else:
+        logger.info("  No negative prices")
+
+    # 3. Проверка что old_price != new_price
+    same_price = pd.read_sql(f"""
+        SELECT COUNT(*) as cnt 
+        FROM {SCHEMA}.price_history 
+        WHERE old_price = new_price
+    """, engine).iloc[0]['cnt']
+    if same_price > 0:
+        warnings.append(f"Records with same old/new price: {same_price}")
+    else:
+        logger.info("  All records have price change")
+
+    # 4. Проверка min change threshold
+    small_changes = pd.read_sql(f"""
+        SELECT COUNT(*) as cnt 
+        FROM {SCHEMA}.price_history 
+        WHERE ABS(old_price - new_price) < {MIN_PRICE_CHANGE}
+    """, engine).iloc[0]['cnt']
+    if small_changes > 0:
+        warnings.append(f"Changes below threshold ({MIN_PRICE_CHANGE}): {small_changes}")
+    else:
+        logger.info(f"  All changes >= {MIN_PRICE_CHANGE}")
+
+    # 5. Дата распределения
+    date_range = pd.read_sql(f"""
+        SELECT 
+            MIN(change_date) as min_date,
+            MAX(change_date) as max_date,
+            COUNT(DISTINCT change_date) as days
+        FROM {SCHEMA}.price_history
+    """, engine).iloc[0]
+    logger.info(f"  Date range: {date_range['min_date']} to {date_range['max_date']} ({date_range['days']} days)")
+
+    # 6. Средний размер изменения
+    avg_change = pd.read_sql(f"""
+        SELECT 
+            AVG(ABS(old_price - new_price)) as avg_abs,
+            AVG((old_price - new_price) / NULLIF(old_price, 0) * 100) as avg_pct
+        FROM {SCHEMA}.price_history
+    """, engine).iloc[0]
+    logger.info(f"  Avg change: {avg_change['avg_abs']:.0f} CZK ({avg_change['avg_pct']:.1f}%)")
+
+    # Результаты
+    if errors:
+        logger.error("Sanity check FAILED:")
+        for e in errors:
+            logger.error(f"  ERROR: {e}")
+        for w in warnings:
+            logger.warning(f"  WARNING: {w}")
+        return False
+
+    if warnings:
+        logger.warning("Sanity check PASSED with warnings:")
+        for w in warnings:
+            logger.warning(f"  WARNING: {w}")
+    else:
+        logger.info("Sanity check PASSED")
+
+    return True
+
+
 # ============== Main ==============
 def main():
     setup_logging()
@@ -303,6 +509,10 @@ def main():
     run_transform(engine)
     logger.info(f"Step 2 complete in {(datetime.now() - start).total_seconds():.1f}s")
 
+    # Sanity check standart
+    logger.info("-" * 60)
+    sanity_check_standart(engine)
+
     # Шаг 3
     logger.info("=" * 60)
     logger.info("STEP 3: Tracking price history")
@@ -310,6 +520,10 @@ def main():
     start = datetime.now()
     run_price_tracking(engine)
     logger.info(f"Step 3 complete in {(datetime.now() - start).total_seconds():.1f}s")
+
+    # Sanity check price history
+    logger.info("-" * 60)
+    sanity_check_price_history(engine)
 
 
 if __name__ == '__main__':
